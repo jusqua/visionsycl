@@ -56,8 +56,16 @@ inline constexpr auto read(const float* data, size_t index) {
     return value;
 }
 
-template<int dimensions>
-inline constexpr auto read(const float* data, const sycl::item<dimensions>& item) {
+inline constexpr auto read(const uint8_t* data, size_t index) {
+    auto value = sycl::float4{0.0f};
+    for(int i = 0; i < s_channels; ++i) {
+        value[i] = static_cast<float>(data[index * s_channels + i]) / 255;
+    }
+    return value;
+}
+
+template<typename T, int dimensions>
+inline constexpr auto read(const T* data, const sycl::item<dimensions>& item) {
     return read(data, item.get_linear_id());
 }
 
@@ -67,8 +75,14 @@ inline constexpr auto write(float* data, size_t index, const sycl::float4& value
     }
 }
 
-template<int dimensions>
-inline constexpr auto write(float* data, const sycl::item<dimensions>& item, const sycl::float4& value) {
+inline constexpr auto write(uint8_t* data, size_t index, const sycl::float4& value) {
+    for(int i = 0; i < s_channels; ++i) {
+        data[index * s_channels + i] = static_cast<uint8_t>(value[i] * 255);
+    }
+}
+
+template<typename T, int dimensions>
+inline constexpr auto write(T* data, const sycl::item<dimensions>& item, const sycl::float4& value) {
     write(data, item.get_linear_id(), value);
 }
 
