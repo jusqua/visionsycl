@@ -6,6 +6,7 @@
 
 namespace hok::detail {
 
+static constexpr auto s_pi = 3.14159265358979323846;
 static constexpr auto s_channels = 4;
 
 template<int dimensions>
@@ -111,6 +112,29 @@ inline constexpr auto map(const sycl::range<dimensions>& range, const F&& apply)
     }
 }
 
+template<int dimensions>
+inline auto repeat(size_t value) {
+    auto range = sycl::range<dimensions>{};
+    for (auto i = 0; i < dimensions; i++) {
+        range[i] = value;
+    }
+    return range;
+}
+
+// TODO: Find a better approach for normal distribution generation
+inline constexpr auto normal(int x, double sigma) {
+    return sycl::exp(-(x*x)/(2*sigma*sigma))/sycl::sqrt(2*s_pi*sigma*sigma);
+}
+
+template<int dimensions>
+inline constexpr auto normal(const sycl::id<dimensions>& relative_index, const sycl::range<dimensions>& alignment, double sigma) {
+    auto weight = 1.0;
+    for (auto i = 0; i < dimensions; i++) {
+        weight *= normal(static_cast<int>(relative_index[i]) - static_cast<int>(alignment[i]), sigma);
+    }
+    return weight;
+}
+
 template<typename F>
 class unary_kernel_impl {
 public:
@@ -175,6 +199,32 @@ private:
     const float* m_wdata;
     const sycl::float4 m_init;
 };
+
+template <int dimensions, typename T, typename F>
+class map_kernel_impl {
+public:
+    map_kernel_impl(const T* in, T* out, const sycl::range<dimensions>& extent, const sycl::float4& init, F&& fn)
+        : m_extent(extent), m_in(in), m_out(out), m_init(init), m_halo(extent / 2), m_fn(std::move(fn)) {}
+
+    void operator()(sycl::item<dimensions> item) const {
+        auto result = m_init;
+        detail::map(m_extent, [&](sycl::id<dimensions> id) {
+            auto px = detail::read(m_in, detail::get_linear_id(item, id, m_halo));
+            m_fn(result, px, id);
+        });
+        detail::write(m_out, item, result);
+    }
+
+private:
+    const T* m_in;
+    T* m_out;
+    F m_fn;
+
+    const sycl::range<dimensions> m_extent;
+    const sycl::range<dimensions> m_halo;
+    const sycl::float4 m_init;
+};
+
 
 } // namespace hok::detail
 
@@ -250,6 +300,19 @@ inline auto sub(const float* input1_data, const float* input2_data, float* outpu
 template<int dimensions>
 [[nodiscard]] inline auto sub(sycl::queue& queue, const sycl::range<dimensions>& io_extent, const float* input1_data, const float* input2_data, float* output_data, const std::vector<sycl::event>& events = {}) {
     return queue.parallel_for(io_extent, events, sub(input1_data, input2_data, output_data));
+}
+
+template<int dimensions, typename T>
+inline auto gaussian(const T* input_data, T* output_data, double sigma) {
+    auto ksize = static_cast<size_t>(2 * detail::s_pi * sigma);
+    if (ksize < 3) ksize = 3; // Minimum 3 sized kernel
+    else if (ksize % 2 == 0) ksize += 1; // Round to odd
+
+    auto extent = detail::repeat<dimensions>(ksize);
+    auto halo = extent / 2;
+    return detail::map_kernel_impl(input_data, output_data, extent, sycl::float4(0), [halo, sigma](sycl::float4& acc, const sycl::float4& px, sycl::id<dimensions> id) {
+        acc += px * hok::detail::normal(id, halo, sigma);
+    });
 }
 
 template<int dimensions>
