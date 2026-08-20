@@ -137,7 +137,9 @@ public:
 
     template<int Dims>
     void operator()(sycl::item<Dims> item) const {
-        detail::write(m_out, item, m_fn(detail::read(m_in1, item), detail::read(m_in2, item)));
+        auto px1 = detail::read(m_in1, item);
+        auto px2 = detail::read(m_in2, item);
+        detail::write(m_out, item, m_fn(px1, px2));
     }
 
 private:
@@ -179,10 +181,9 @@ private:
 namespace hok {
 
 inline auto gray(const float* input_data, float* output_data) {
-    return detail::unary_kernel_impl(input_data, output_data, [](sycl::float4& px) {
+    return detail::unary_kernel_impl(input_data, output_data, [](const sycl::float4& px) {
         float gray = px.x() * 0.299f + px.y() * 0.587f + px.z() * 0.114f;
-        px.x() = px.y() = px.z() = gray;
-        return px;
+        return sycl::float4{gray, gray, gray, px.w()};
     });
 }
 
@@ -192,11 +193,13 @@ template<int dimensions>
 }
 
 inline auto thresh(const float* input_data, float* output_data, float threshold) {
-    return detail::unary_kernel_impl(input_data, output_data, [threshold](sycl::float4& px) {
-        px.x() = px.x() > threshold ? 1.0f : 0.0f;
-        px.y() = px.y() > threshold ? 1.0f : 0.0f;
-        px.z() = px.z() > threshold ? 1.0f : 0.0f;
-        return px;
+    return detail::unary_kernel_impl(input_data, output_data, [threshold](const sycl::float4& px) {
+        return sycl::float4{
+            px.x() > threshold ? 1.0f : 0.0f,
+            px.y() > threshold ? 1.0f : 0.0f,
+            px.z() > threshold ? 1.0f : 0.0f,
+            px.w()
+        };
     });
 }
 
@@ -206,8 +209,8 @@ template<int dimensions>
 }
 
 inline auto min(const float* input1_data, const float* input2_data, float* output_data) {
-    return detail::binary_kernel_impl(input1_data, input2_data, output_data, [](sycl::float4& px, sycl::float4& px2) {
-        return sycl::min(px, px2);
+    return detail::binary_kernel_impl(input1_data, input2_data, output_data, [](const sycl::float4& px1, const sycl::float4& px2) {
+        return sycl::min(px1, px2);
     });
 }
 
@@ -217,8 +220,8 @@ template<int dimensions>
 }
 
 inline auto max(const float* input1_data, const float* input2_data, float* output_data) {
-    return detail::binary_kernel_impl(input1_data, input2_data, output_data, [](sycl::float4& px, sycl::float4& px2) {
-        return sycl::max(px, px2);
+    return detail::binary_kernel_impl(input1_data, input2_data, output_data, [](const sycl::float4& px1, const sycl::float4& px2) {
+        return sycl::max(px1, px2);
     });
 }
 
@@ -228,8 +231,8 @@ template<int dimensions>
 }
 
 inline auto sum(const float* input1_data, const float* input2_data, float* output_data) {
-    return detail::binary_kernel_impl(input1_data, input2_data, output_data, [](sycl::float4& px, sycl::float4& px2) {
-        return sycl::min(px + px2, sycl::float4(1.0f));
+    return detail::binary_kernel_impl(input1_data, input2_data, output_data, [](const sycl::float4& px1, const sycl::float4& px2) {
+        return sycl::min(px1 + px2, sycl::float4(1.0f));
     });
 }
 
@@ -239,8 +242,8 @@ template<int dimensions>
 }
 
 inline auto sub(const float* input1_data, const float* input2_data, float* output_data) {
-    return detail::binary_kernel_impl(input1_data, input2_data, output_data, [](sycl::float4& px, sycl::float4& px2) {
-        return sycl::max(px - px2, sycl::float4(0.0f));
+    return detail::binary_kernel_impl(input1_data, input2_data, output_data, [](const sycl::float4& px1, const sycl::float4& px2) {
+        return sycl::max(px1 - px2, sycl::float4(0.0f));
     });
 }
 
@@ -251,7 +254,7 @@ template<int dimensions>
 
 template<int dimensions>
 inline auto convolve(const float* input_data, float* output_data, const sycl::range<dimensions>& window_extent, const float* window_data) {
-    return detail::window_kernel_impl(input_data, output_data, window_extent, window_data, sycl::float4(0), [](sycl::float4& acc, sycl::float4& px, float val) {
+    return detail::window_kernel_impl(input_data, output_data, window_extent, window_data, sycl::float4(0), [](sycl::float4& acc, const sycl::float4& px, float val) {
         acc += px * val;
     });
 }
@@ -263,7 +266,7 @@ template<int dimensions>
 
 template<int dimensions>
 inline auto erode(const float* input_data, float* output_data, const sycl::range<dimensions>& window_extent, const float* window_data) {
-    return detail::window_kernel_impl(input_data, output_data, window_extent, window_data, sycl::float4(1), [](sycl::float4& acc, sycl::float4& px, float val) {
+    return detail::window_kernel_impl(input_data, output_data, window_extent, window_data, sycl::float4(1), [](sycl::float4& acc, const sycl::float4& px, float val) {
         if (val != 0.0f && acc[0] + acc[1] + acc[2] > px[0] + px[1] + px[2]) {
             acc = px;
         }
@@ -277,7 +280,7 @@ template<int dimensions>
 
 template<int dimensions>
 inline auto dilate(const float* input_data, float* output_data, const sycl::range<dimensions>& window_extent, const float* window_data) {
-    return detail::window_kernel_impl(input_data, output_data, window_extent, window_data, sycl::float4(0), [](sycl::float4& acc, sycl::float4& px, float val) {
+    return detail::window_kernel_impl(input_data, output_data, window_extent, window_data, sycl::float4(0), [](sycl::float4& acc, const sycl::float4& px, float val) {
         if (val != 0.0f && px[0] + px[1] + px[2] > acc[0] + acc[1] + acc[2]) {
             acc = px;
         }
