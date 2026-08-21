@@ -87,6 +87,31 @@ inline constexpr auto write(T* data, const sycl::item<dimensions>& item, const s
     write(data, item.get_linear_id(), value);
 }
 
+inline auto abs_diff(const sycl::float4& px1, const sycl::float4& px2) {
+    auto diff = px1 - px2;
+    for (auto i = 0; i < 4; i++) {
+        if (diff[i] < 0.0f) {
+            diff[i] = -diff[i];
+        }
+    }
+    return diff;
+}
+
+inline auto sqr_abs_diff(const sycl::float4& px1, const sycl::float4& px2) {
+    auto diff = abs_diff(px1, px2);
+    return diff * diff;
+}
+
+template<int dimensions>
+inline auto sum_sqr(const sycl::id<dimensions>& id, const sycl::range<dimensions>& halo) {
+    auto result = 0.0;
+    for (auto i = 0; i < dimensions; i++) {
+        auto diff = static_cast<int>(id[i]) - static_cast<int>(halo[i]);
+        result += diff * diff;
+    }
+    return result;
+}
+
 template <typename F, int dimensions>
 inline constexpr auto map(const sycl::range<dimensions>& range, const F&& apply) {
     if constexpr (dimensions == 1) {
@@ -313,6 +338,34 @@ inline auto gaussian(const T* input_data, T* output_data, double sigma) {
     return detail::map_kernel_impl(input_data, output_data, extent, sycl::float4(0), [halo, sigma](sycl::float4& acc, const sycl::float4& px, sycl::id<dimensions> id) {
         acc += px * hok::detail::normal(id, halo, sigma);
     });
+}
+
+template<int dimensions, typename T>
+inline auto bilateral(const T* input, T* output, double sigma_space, double sigma_color) {
+    auto space_coeff = -.5 / sigma_space / sigma_space;
+    auto color_coeff = -.5 / sigma_color / sigma_color;
+
+    auto radius = static_cast<size_t>(2 * detail::s_pi * sigma_space + 1);
+    auto extent = detail::repeat<dimensions>(radius);
+    auto halo = extent / 2;
+
+    return [=](sycl::item<dimensions> item) {
+        auto result_sum = sycl::float4{};
+        auto weight_sum = sycl::float4{};
+        auto curr_pixel = detail::read(input, item);
+
+        detail::map(extent, [&](sycl::id<dimensions> id) {
+            auto rel_pixel = detail::read(input, detail::get_linear_id(item, id, halo));
+            auto pixel_diff = detail::sqr_abs_diff(curr_pixel, rel_pixel);
+            auto pixel_dist = detail::sum_sqr(id, halo);
+
+            auto weight = sycl::exp(pixel_dist * space_coeff + pixel_diff * color_coeff);
+            result_sum += rel_pixel * weight;
+            weight_sum += weight;
+        });
+
+        detail::write(output, item, result_sum / weight_sum);
+    };
 }
 
 template<int dimensions>
