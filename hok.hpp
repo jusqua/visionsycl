@@ -354,48 +354,39 @@ inline auto binary(const T* input, T* output, float threshold) {
     };
 }
 
-inline auto min(const float* input1_data, const float* input2_data, float* output_data) {
-    return detail::binary_kernel_impl(input1_data, input2_data, output_data, [](const sycl::float4& px1, const sycl::float4& px2) {
-        return sycl::min(px1, px2);
-    });
+template<int dimensions = 1, typename T>
+inline auto min(const T* input1, const T* input2, T* output) {
+    return [=](sycl::item<dimensions> item) {
+        detail::write(output, item, sycl::min(detail::read(input1, item), detail::read(input2, item)));
+    };
 }
 
-template<int dimensions>
-[[nodiscard]] inline auto min(sycl::queue& queue, const sycl::range<dimensions>& io_extent, const float* input1_data, const float* input2_data, float* output_data, const std::vector<sycl::event>& events = {}) {
-    return queue.parallel_for(io_extent, events, min(input1_data, input2_data, output_data));
+template<int dimensions = 1, typename T>
+inline auto max(const T* input1, const T* input2, T* output) {
+    return [=](sycl::item<dimensions> item) {
+        detail::write(output, item, sycl::max(detail::read(input1, item), detail::read(input2, item)));
+    };
 }
 
-inline auto max(const float* input1_data, const float* input2_data, float* output_data) {
-    return detail::binary_kernel_impl(input1_data, input2_data, output_data, [](const sycl::float4& px1, const sycl::float4& px2) {
-        return sycl::max(px1, px2);
-    });
+template<int dimensions = 1, typename T>
+inline auto sum(const T* input1, const T* input2, T* output) {
+    return [=](sycl::item<dimensions> item) {
+        detail::write(output, item, sycl::min(detail::read(input1, item) + detail::read(input2, item), sycl::float4(1.0f)));
+    };
 }
 
-template<int dimensions>
-[[nodiscard]] inline auto max(sycl::queue& queue, const sycl::range<dimensions>& io_extent, const float* input1_data, const float* input2_data, float* output_data, const std::vector<sycl::event>& events = {}) {
-    return queue.parallel_for(io_extent, events, max(input1_data, input2_data, output_data));
+template<int dimensions = 1, typename T>
+inline auto sub(const T* input1, const T* input2, T* output) {
+    return [=](sycl::item<dimensions> item) {
+        detail::write(output, item, sycl::max(detail::read(input1, item) - detail::read(input2, item), sycl::float4(0.0f)));
+    };
 }
 
-inline auto sum(const float* input1_data, const float* input2_data, float* output_data) {
-    return detail::binary_kernel_impl(input1_data, input2_data, output_data, [](const sycl::float4& px1, const sycl::float4& px2) {
-        return sycl::min(px1 + px2, sycl::float4(1.0f));
-    });
-}
-
-template<int dimensions>
-[[nodiscard]] inline auto sum(sycl::queue& queue, const sycl::range<dimensions>& io_extent, const float* input1_data, const float* input2_data, float* output_data, const std::vector<sycl::event>& events = {}) {
-    return queue.parallel_for(io_extent, events, sum(input1_data, input2_data, output_data));
-}
-
-inline auto sub(const float* input1_data, const float* input2_data, float* output_data) {
-    return detail::binary_kernel_impl(input1_data, input2_data, output_data, [](const sycl::float4& px1, const sycl::float4& px2) {
-        return sycl::max(px1 - px2, sycl::float4(0.0f));
-    });
-}
-
-template<int dimensions>
-[[nodiscard]] inline auto sub(sycl::queue& queue, const sycl::range<dimensions>& io_extent, const float* input1_data, const float* input2_data, float* output_data, const std::vector<sycl::event>& events = {}) {
-    return queue.parallel_for(io_extent, events, sub(input1_data, input2_data, output_data));
+template<int dimensions = 1, typename T>
+inline auto mul(const T* input1, const T* input2, T* output) {
+    return [=](sycl::item<dimensions> item) {
+        detail::write(output, item, sycl::min(detail::read(input1, item) * detail::read(input2, item), sycl::float4(1.0f)));
+    };
 }
 
 template<int dimensions, typename T>
