@@ -4,6 +4,22 @@
 
 #include <sycl/sycl.hpp>
 
+namespace hok::strategy {
+
+enum class gray {
+    average,
+    luminance_bt601,
+    luminance_bt709,
+    decomposition_min,
+    decomposition_max,
+    desaturation,
+    red,
+    green,
+    blue,
+};
+
+}
+
 namespace hok::detail {
 
 static constexpr auto s_pi = 3.14159265358979323846;
@@ -160,6 +176,32 @@ inline constexpr auto normal(const sycl::id<dimensions>& relative_index, const s
     return weight;
 }
 
+template<strategy::gray strategy>
+inline constexpr auto gray(const sycl::float4& pixel) -> float {
+    auto gray = 0.0f;
+    switch (strategy) {
+        case strategy::gray::average:
+            gray = (pixel.x() + pixel.y()+ pixel.z()) / 3.f; break;
+        case strategy::gray::luminance_bt601:
+            gray = pixel.x() * 0.299f + pixel.y() * 0.587f + pixel.z() * 0.114f; break;
+        case strategy::gray::luminance_bt709:
+            gray = pixel.x() * 0.2126f + pixel.y() * 0.7152f + pixel.z() * 0.0722f; break;
+        case strategy::gray::decomposition_min:
+            gray = sycl::min(pixel.x(), sycl::min(pixel.y(), pixel.z())); break;
+        case strategy::gray::decomposition_max:
+            gray = sycl::max(pixel.x(), sycl::max(pixel.y(), pixel.z())); break;
+        case strategy::gray::desaturation:
+            gray = (sycl::max(pixel.x(), sycl::max(pixel.y(), pixel.z())) + sycl::min(pixel.x(), sycl::min(pixel.y(), pixel.z()))) / 2.f; break;
+        case strategy::gray::red:
+            gray = pixel.x(); break;
+        case strategy::gray::green:
+            gray = pixel.y(); break;
+        case strategy::gray::blue:
+            gray = pixel.z(); break;
+    }
+    return gray;
+}
+
 template<typename F>
 class unary_kernel_impl {
 public:
@@ -250,37 +292,66 @@ private:
     const sycl::float4 m_init;
 };
 
-
 } // namespace hok::detail
 
 namespace hok {
 
-inline auto gray(const float* input_data, float* output_data) {
-    return detail::unary_kernel_impl(input_data, output_data, [](const sycl::float4& px) {
-        float gray = px.x() * 0.299f + px.y() * 0.587f + px.z() * 0.114f;
-        return sycl::float4{gray, gray, gray, px.w()};
-    });
+/// Add factor to the signal value
+template<int dimensions = 1, typename T>
+inline auto intensity(const T* input, T* output, float factor) {
+    return [=](sycl::item<dimensions> item) {
+        detail::write(output, item, detail::read(input, item) + factor);
+    };
 }
 
-template<int dimensions>
-[[nodiscard]] inline auto gray(sycl::queue& queue, const sycl::range<dimensions>& io_extent, const float* input_data, float* output_data, const std::vector<sycl::event>& events = {}) {
-    return queue.parallel_for(io_extent, events, gray(input_data, output_data));
+/// Multiply factor to the signal value
+template<int dimensions = 1, typename T>
+inline auto contrast(const T* input, T* output, float factor) {
+    return [=](sycl::item<dimensions> item) {
+        detail::write(output, item, detail::read(input, item) * factor);
+    };
 }
 
-inline auto thresh(const float* input_data, float* output_data, float threshold) {
-    return detail::unary_kernel_impl(input_data, output_data, [threshold](const sycl::float4& px) {
-        return sycl::float4{
+/// Multiply factor to the signal value
+template<int dimensions = 1, typename T>
+inline auto invert(const T* input, T* output) {
+    return [=](sycl::item<dimensions> item) {
+        detail::write(output, item, 1.0f - detail::read(input, item));
+    };
+}
+
+/// Normalize color channels to a single value
+template<int dimensions = 1, strategy::gray strategy = strategy::gray::luminance_bt601, typename T>
+inline auto gray(const T* input, T* output) {
+    return [=](sycl::item<dimensions> item) {
+        auto px = detail::read(input, item);
+        auto val = detail::gray<strategy>(px);
+        detail::write(output, item, sycl::float4{val, val, val, px.w()});
+    };
+}
+
+/// Creates a binary value of the color channels
+template<int dimensions = 1, typename T>
+inline auto thresh(const T* input, T* output, float threshold) {
+    return [=](sycl::item<dimensions> item) {
+        auto px = detail::read(input, item);
+        detail::write(output, item, sycl::float4{
             px.x() > threshold ? 1.0f : 0.0f,
             px.y() > threshold ? 1.0f : 0.0f,
             px.z() > threshold ? 1.0f : 0.0f,
             px.w()
-        };
-    });
+        });
+    };
 }
 
-template<int dimensions>
-[[nodiscard]] inline auto thresh(sycl::queue& queue, const sycl::range<dimensions>& io_extent, const float* input_data, float* output_data, float threshold, const std::vector<sycl::event>& events = {}) {
-    return queue.parallel_for(io_extent, events, thresh(input_data, output_data, threshold));
+/// Creates a binary value of the signal
+template<int dimensions = 1, strategy::gray strategy = strategy::gray::luminance_bt601, typename T>
+inline auto binary(const T* input, T* output, float threshold) {
+    return [=](sycl::item<dimensions> item) {
+        auto px = detail::read(input, item);
+        auto val = detail::gray<strategy>(px) > threshold ? 1.0f : 0.0f;
+        detail::write(output, item, sycl::float4{val, val, val, px.w()});
+    };
 }
 
 inline auto min(const float* input1_data, const float* input2_data, float* output_data) {
@@ -406,11 +477,6 @@ inline auto dilate(const float* input_data, float* output_data, const sycl::rang
 template<int dimensions>
 [[nodiscard]] inline auto dilate(sycl::queue& queue, const sycl::range<dimensions>& io_extent, const float* input_data, float* output_data, const sycl::range<dimensions>& window_extent, const float* window_data, const std::vector<sycl::event>& events = {}) {
     return queue.parallel_for(io_extent, events, dilate(input_data, output_data, window_extent, window_data));
-}
-
-template<int dimensions>
-[[nodiscard]] inline auto binary(sycl::queue& queue, const sycl::range<dimensions>& io_extent, const float* input_data, float* output_data, float threshold, const std::vector<sycl::event>& events = {}) {
-    return thresh(queue, io_extent, output_data, output_data, threshold, { gray(queue, io_extent, input_data, output_data, events) });
 }
 
 template<int dimensions>
