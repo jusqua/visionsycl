@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <sycl/detail/builtins/builtins.hpp>
 #include <sycl/sycl.hpp>
 
 namespace hok::strategy {
@@ -378,6 +379,26 @@ inline auto bilateral(const sycl::range<dimensions>& io_extent, const T* input, 
             });
 
             detail::write(output, item, result_sum / weight_sum);
+        });
+    };
+}
+
+template<int dimensions, typename T>
+inline auto average(const sycl::range<dimensions>& io_extent, const T* input, T* output, size_t radius) {
+    return [=](sycl::handler& cgh) {
+        auto extent = detail::repeat<dimensions>(2 * radius + 1);
+        auto halo = extent / 2;
+
+        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
+            auto result = sycl::float4(0);
+
+            detail::map(extent, [&](sycl::id<dimensions> id) {
+                auto px = detail::read(input, detail::get_linear_id(item, id, halo));
+                result += px;
+            });
+
+            result /= extent.size();
+            detail::write(output, item, result);
         });
     };
 }
