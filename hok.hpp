@@ -2,7 +2,9 @@
 
 #pragma once
 
+#include <cmath>
 #include <sycl/detail/builtins/builtins.hpp>
+#include <sycl/marray.hpp>
 #include <sycl/sycl.hpp>
 
 namespace hok::strategy {
@@ -22,6 +24,25 @@ enum class gray {
 }
 
 namespace hok::detail {
+
+namespace meta {
+
+template <size_t base, size_t exp>
+struct pow {
+    static const size_t value = base * pow<base, exp - 1>::value;
+};
+template <size_t base>
+struct pow<base, 0> {
+    static const size_t value = 1;
+};
+
+template <size_t base, size_t exp>
+constexpr auto pow_v() {
+    return pow<base, exp>::value;
+}
+
+}
+
 
 static constexpr auto s_pi = 3.14159265358979323846;
 static constexpr auto s_channels = 4;
@@ -399,6 +420,42 @@ inline auto average(const sycl::range<dimensions>& io_extent, const T* input, T*
 
             result /= extent.size();
             detail::write(output, item, result);
+        });
+    };
+}
+
+template<size_t radius, int dimensions, typename T>
+inline auto median(const sycl::range<dimensions>& io_extent, const T* input, T* output) {
+    return [=](sycl::handler& cgh) {
+        constexpr auto buffer_size = detail::meta::pow_v<2 * radius + 1, dimensions>();
+        auto extent = detail::repeat<dimensions>(2 * radius + 1);
+        auto halo = extent / 2;
+
+        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
+            auto count = 0;
+            auto buffer = sycl::marray<sycl::float4, buffer_size>{};
+
+            detail::map(extent, [&](sycl::id<dimensions> id) {
+                auto px = detail::read(input, detail::get_linear_id(item, id, halo));
+                buffer[count++] = px;
+            });
+
+            for (auto i = 0; i < count - 1; i++) {
+                auto swapped = false;
+                for (auto j = 0; j < count - i - 1; j++) {
+                    if (buffer[j].x() + buffer[j].y() + buffer[j].z() <= buffer[j + 1].x() + buffer[j + 1].y() + buffer[j + 1].z())
+                        continue;
+
+                    swapped = true;
+                    auto tmp = buffer[j];
+                    buffer[j] = buffer[j + 1];
+                    buffer[j + 1] = tmp;
+                }
+
+                if (!swapped) break;
+            }
+
+            detail::write(output, item, buffer[(count - 1) / 2]);
         });
     };
 }
