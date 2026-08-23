@@ -424,7 +424,7 @@ inline auto average(const sycl::range<dimensions>& io_extent, const T* input, T*
     };
 }
 
-template<size_t radius, int dimensions, typename T>
+template<size_t radius = 1, int dimensions, typename T>
 inline auto median(const sycl::range<dimensions>& io_extent, const T* input, T* output) {
     return [=](sycl::handler& cgh) {
         constexpr auto buffer_size = detail::meta::pow_v<2 * radius + 1, dimensions>();
@@ -440,6 +440,7 @@ inline auto median(const sycl::range<dimensions>& io_extent, const T* input, T* 
                 buffer[count++] = px;
             });
 
+            // It's fine if the radius is sufficiently small
             for (auto i = 0; i < count - 1; i++) {
                 auto swapped = false;
                 for (auto j = 0; j < count - i - 1; j++) {
