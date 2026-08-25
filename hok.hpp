@@ -2,31 +2,14 @@
 
 #pragma once
 
-#include <cmath>
-#include <sycl/detail/builtins/builtins.hpp>
-#include <sycl/marray.hpp>
 #include <sycl/sycl.hpp>
 
-namespace hok::strategy {
+// TODO: Document
+namespace hok {
 
-enum class gray {
-    average,
-    luminance_bt601,
-    luminance_bt709,
-    decomposition_min,
-    decomposition_max,
-    desaturation,
-    red,
-    green,
-    blue,
-};
+namespace detail {
 
-}
-
-namespace hok::detail {
-
-namespace meta {
-
+// XXX: Exist another way to do this?
 template <size_t base, size_t exp>
 struct pow {
     static const size_t value = base * pow<base, exp - 1>::value;
@@ -40,9 +23,6 @@ template <size_t base, size_t exp>
 constexpr auto pow_v() {
     return pow<base, exp>::value;
 }
-
-}
-
 
 static constexpr auto s_pi = 3.14159265358979323846;
 static constexpr auto s_channels = 4;
@@ -184,400 +164,409 @@ inline auto repeat(size_t value) {
     return range;
 }
 
-template<strategy::gray strategy>
-inline constexpr auto gray(const sycl::float4& pixel) -> float {
-    auto gray = 0.0f;
-    switch (strategy) {
-        case strategy::gray::average:
-            gray = (pixel.x() + pixel.y()+ pixel.z()) / 3.f; break;
-        case strategy::gray::luminance_bt601:
-            gray = pixel.x() * 0.299f + pixel.y() * 0.587f + pixel.z() * 0.114f; break;
-        case strategy::gray::luminance_bt709:
-            gray = pixel.x() * 0.2126f + pixel.y() * 0.7152f + pixel.z() * 0.0722f; break;
-        case strategy::gray::decomposition_min:
-            gray = sycl::min(pixel.x(), sycl::min(pixel.y(), pixel.z())); break;
-        case strategy::gray::decomposition_max:
-            gray = sycl::max(pixel.x(), sycl::max(pixel.y(), pixel.z())); break;
-        case strategy::gray::desaturation:
-            gray = (sycl::max(pixel.x(), sycl::max(pixel.y(), pixel.z())) + sycl::min(pixel.x(), sycl::min(pixel.y(), pixel.z()))) / 2.f; break;
-        case strategy::gray::red:
-            gray = pixel.x(); break;
-        case strategy::gray::green:
-            gray = pixel.y(); break;
-        case strategy::gray::blue:
-            gray = pixel.z(); break;
-    }
-    return gray;
-}
+} // namespace detail
 
-} // namespace hok::detail
+// TODO: Create some kernel launch utility
+namespace wrapper {
 
-// TODO: Document the kernels
-// TODO: Provide a better wrapper for nd_item handling
-namespace hok {
-
-template<int dimensions = 1, typename T>
-inline auto intensity(const sycl::range<dimensions>& io_extent, const T* input, T* output, float factor) {
-    return [=](sycl::handler& cgh) {
-        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
-            auto px = detail::read(input, item);
-            auto val = px + factor;
-            detail::write(output, item, val);
-        });
+template<int dimensions = 1, typename T, typename F>
+inline constexpr auto unary(const T* input, T* output, F&& fn) {
+    return [=](sycl::item<dimensions> item) {
+        auto px = detail::read(input, item);
+        auto val = fn(px);
+        detail::write(output, item, val);
     };
 }
 
-template<int dimensions = 1, typename T>
-inline auto contrast(const sycl::range<dimensions>& io_extent, const T* input, T* output, float factor) {
-    return [=](sycl::handler& cgh) {
-        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
-            auto px = detail::read(input, item);
-            auto val = px * factor;
-            detail::write(output, item, val);
-        });
+template<int dimensions = 1, typename T, typename F>
+inline constexpr auto binary(const T* input1, const T* input2, T* output, F&& fn) {
+    return [=](sycl::item<dimensions> item) {
+        auto px1 = detail::read(input1, item);
+        auto px2 = detail::read(input2, item);
+        auto val = fn(px1, px2);
+        detail::write(output, item, val);
     };
 }
 
-template<int dimensions = 1, typename T>
-inline auto invert(const sycl::range<dimensions>& io_extent, const T* input, T* output) {
-    return [=](sycl::handler& cgh) {
-        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
-            auto px = detail::read(input, item);
-            auto val = 1.0f - px;
-            detail::write(output, item, val);
+template<int dimensions, typename T, typename F>
+inline constexpr auto map(const T* input, T* output, const sycl::range<dimensions>& extent, const sycl::float4& init, F&& fn) {
+    auto halo = extent / 2;
+
+    return [=](sycl::item<dimensions> item) {
+        auto acc = init;
+
+        detail::map(extent, [&](sycl::id<dimensions> id) {
+            auto px = detail::read(input, detail::get_linear_id(item, id, halo));
+            fn(acc, px, id);
         });
+
+        detail::write(output, item, acc);
     };
 }
 
-template<int dimensions = 1, strategy::gray strategy = strategy::gray::luminance_bt601, typename T>
-inline auto gray(const sycl::range<dimensions>& io_extent, const T* input, T* output) {
-    return [=](sycl::handler& cgh) {
-        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
-            auto px = detail::read(input, item);
-            auto g = detail::gray<strategy>(px);
-            auto val = sycl::float4{g, g, g, px.w()};
-            detail::write(output, item, val);
-        });
-    };
+template<int dimensions, typename T, typename F>
+inline constexpr auto map(const T* input, T* output, const sycl::range<dimensions>& extent, F&& fn) {
+    return map(input, output, extent, sycl::float4{0.0f}, fn);
 }
 
+} // namespace wrapper
+
+namespace strategy {
+
+enum class gray {
+    mean,
+    luminance_bt601,
+    luminance_bt709,
+    decomposition_min,
+    decomposition_max,
+    desaturation,
+    red,
+    green,
+    blue,
+};
+
+enum class thresh {
+    normal,
+    invert,
+};
+
+} // namespace strategy
+
 template<int dimensions = 1, typename T>
-inline auto thresh(const sycl::range<dimensions>& io_extent, const T* input, T* output, float threshold) {
-    return [=](sycl::handler& cgh) {
-        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
-            auto px = detail::read(input, item);
-            auto val = sycl::float4{
-                px.x() > threshold ? 1.0f : 0.0f,
-                px.y() > threshold ? 1.0f : 0.0f,
-                px.z() > threshold ? 1.0f : 0.0f,
+inline auto intensity(const T* input, T* output, float factor) {
+    return wrapper::unary<dimensions>(input, output,
+        [=](const sycl::float4& px) {
+            return sycl::float4{
+                sycl::clamp(px.x() + factor, 0.0f, 1.0f),
+                sycl::clamp(px.y() + factor, 0.0f, 1.0f),
+                sycl::clamp(px.z() + factor, 0.0f, 1.0f),
                 px.w()
             };
-            detail::write(output, item, val);
-        });
-    };
+        }
+    );
+}
+
+template<int dimensions = 1, typename T>
+inline auto contrast(const T* input, T* output, float factor) {
+    return wrapper::unary<dimensions>(input, output,
+        [=](const sycl::float4& px) {
+            return sycl::float4{
+                sycl::clamp(px.x() * factor, 0.0f, 1.0f),
+                sycl::clamp(px.y() * factor, 0.0f, 1.0f),
+                sycl::clamp(px.z() * factor, 0.0f, 1.0f),
+                px.w()
+            };
+        }
+    );
+}
+
+template<int dimensions = 1, typename T>
+inline auto invert(const T* input, T* output) {
+    return wrapper::unary<dimensions>(input, output,
+        [=](const sycl::float4& px) {
+            return sycl::float4{
+                1.0f - px.x(),
+                1.0f - px.y(),
+                1.0f - px.z(),
+                px.w()
+            };
+        }
+    );
 }
 
 template<int dimensions = 1, strategy::gray strategy = strategy::gray::luminance_bt601, typename T>
-inline auto binary(const sycl::range<dimensions>& io_extent, const T* input, T* output, float threshold) {
-    return [=](sycl::handler& cgh) {
-        gray<dimensions, strategy>(io_extent, input, output)(cgh);
-        thresh<dimensions>(io_extent, input, output, threshold)(cgh);
-    };
-}
-
-template<int dimensions = 1, typename T>
-inline auto min(const sycl::range<dimensions>& io_extent, const T* input1, const T* input2, T* output) {
-    return [=](sycl::handler& cgh) {
-        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
-            auto px1 = detail::read(input1, item);
-            auto px2 = detail::read(input2, item);
-            auto val = sycl::min(px1, px2);
-            detail::write(output, item, val);
-        });
-    };
-}
-
-template<int dimensions = 1, typename T>
-inline auto max(const sycl::range<dimensions>& io_extent, const T* input1, const T* input2, T* output) {
-    return [=](sycl::handler& cgh) {
-        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
-            auto px1 = detail::read(input1, item);
-            auto px2 = detail::read(input2, item);
-            auto val = sycl::max(px1, px2);
-            detail::write(output, item, val);
-        });
-    };
-}
-
-template<int dimensions = 1, typename T>
-inline auto sum(const sycl::range<dimensions>& io_extent, const T* input1, const T* input2, T* output) {
-    return [=](sycl::handler& cgh) {
-        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
-            auto px1 = detail::read(input1, item);
-            auto px2 = detail::read(input2, item);
-            auto val = sycl::min(sycl::float4{1.0f}, px1 + px2);
-            detail::write(output, item, val);
-        });
-    };
-}
-
-template<int dimensions = 1, typename T>
-inline auto sub(const sycl::range<dimensions>& io_extent, const T* input1, const T* input2, T* output) {
-    return [=](sycl::handler& cgh) {
-        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
-            auto px1 = detail::read(input1, item);
-            auto px2 = detail::read(input2, item);
-            auto val = sycl::max(sycl::float4{0.0f}, px1 - px2);
-            detail::write(output, item, val);
-        });
-    };
-}
-
-template<int dimensions = 1, typename T>
-inline auto mul(const sycl::range<dimensions>& io_extent, const T* input1, const T* input2, T* output) {
-    return [=](sycl::handler& cgh) {
-        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
-            auto px1 = detail::read(input1, item);
-            auto px2 = detail::read(input2, item);
-            auto val = sycl::min(sycl::float4{1.0f}, px1 * px2);
-            detail::write(output, item, val);
-        });
-    };
-}
-
-template<int dimensions, typename T>
-inline auto gaussian(const sycl::range<dimensions>& io_extent, const T* input, T* output, double sigma) {
-    return [=](sycl::handler& cgh) {
-        auto radius = static_cast<size_t>(2 * detail::s_pi * sigma + 1);
-        auto extent = detail::repeat<dimensions>(radius);
-        auto halo = extent / 2;
-
-        auto coeff = -.5 / sigma / sigma;
-        auto normal = 1.0;
-        for (auto i = 0; i < dimensions; i++) {
-            normal *= sycl::sqrt(2 * detail::s_pi * sigma * sigma);
+inline auto gray(const T* input, T* output) {
+    return wrapper::unary<dimensions>(input, output,
+        [=](const sycl::float4& px) {
+            auto g = 0.0f;
+            switch (strategy) {
+                case strategy::gray::mean:
+                    g = (px.x() + px.y()+ px.z()) / 3.f; break;
+                case strategy::gray::luminance_bt601:
+                    g = px.x() * 0.299f + px.y() * 0.587f + px.z() * 0.114f; break;
+                case strategy::gray::luminance_bt709:
+                    g = px.x() * 0.2126f + px.y() * 0.7152f + px.z() * 0.0722f; break;
+                case strategy::gray::decomposition_min:
+                    g = sycl::min(px.x(), sycl::min(px.y(), px.z())); break;
+                case strategy::gray::decomposition_max:
+                    g = sycl::max(px.x(), sycl::max(px.y(), px.z())); break;
+                case strategy::gray::desaturation:
+                    g = (sycl::max(px.x(), sycl::max(px.y(), px.z()))
+                        + sycl::min(px.x(), sycl::min(px.y(), px.z())))
+                        / 2.f; break;
+                case strategy::gray::red:
+                    g = px.x(); break;
+                case strategy::gray::green:
+                    g = px.y(); break;
+                case strategy::gray::blue:
+                    g = px.z(); break;
+            }
+            return sycl::float4{g, g, g, px.w()};
         }
+    );
+}
 
-        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
-            auto result = sycl::float4(0);
+template<int dimensions = 1, strategy::thresh strategy = strategy::thresh::normal, typename T>
+inline auto thresh(const T* input, T* output, float threshold = 0.5f) {
+    return wrapper::unary<dimensions>(input, output,
+        [=](const sycl::float4& px) {
+            if constexpr (strategy == strategy::thresh::normal) {
+                return sycl::float4{
+                    px.x() > threshold ? 1.0f : 0.0f,
+                    px.y() > threshold ? 1.0f : 0.0f,
+                    px.z() > threshold ? 1.0f : 0.0f,
+                    px.w()
+                };
+            } else if constexpr (strategy == strategy::thresh::invert) {
+                return sycl::float4{
+                    px.x() < threshold ? 1.0f : 0.0f,
+                    px.y() < threshold ? 1.0f : 0.0f,
+                    px.z() < threshold ? 1.0f : 0.0f,
+                    px.w()
+                };
+            }
+        }
+    );
+}
 
-            detail::map(extent, [&](sycl::id<dimensions> id) {
-                auto px = detail::read(input, detail::get_linear_id(item, id, halo));
-                auto pixel_dist = detail::sum_sqr(id, halo);
-                auto weight = sycl::exp(pixel_dist * coeff) / normal;
+template<int dimensions = 1,
+        strategy::thresh thresh_strategy = strategy::thresh::normal,
+        strategy::gray gray_strategy = strategy::gray::luminance_bt601,
+        typename T>
+inline constexpr auto binary(const T* input, T* output, float threshold = 0.5f) {
+    return std::make_tuple(
+        gray<dimensions, gray_strategy>(input, output),
+        thresh<dimensions, thresh_strategy>(output, output, threshold)
+    );
+}
 
-                result += px * weight;
-            });
+template<int dimensions = 1, typename T>
+inline auto min(const T* input1, const T* input2, T* output) {
+    return wrapper::binary<dimensions>(input1, input2, output,
+        [=](const sycl::float4& px1, const sycl::float4& px2) {
+            return sycl::min(px1, px2);
+        }
+    );
+}
 
-            detail::write(output, item, result);
+template<int dimensions = 1, typename T>
+inline auto max(const T* input1, const T* input2, T* output) {
+    return wrapper::binary<dimensions>(input1, input2, output,
+        [=](const sycl::float4& px1, const sycl::float4& px2) {
+            return sycl::max(px1, px2);
+        }
+    );
+}
+
+template<int dimensions = 1, typename T>
+inline auto sum(const T* input1, const T* input2, T* output) {
+    return wrapper::binary<dimensions>(input1, input2, output,
+        [=](const sycl::float4& px1, const sycl::float4& px2) {
+            return sycl::float4{
+                sycl::min(1.0f, px1.x() + px2.x()),
+                sycl::min(1.0f, px1.y() + px2.y()),
+                sycl::min(1.0f, px1.z() + px2.z()),
+                1.0f
+            };
+        }
+    );
+}
+
+template<int dimensions = 1, typename T>
+inline auto sub(const T* input1, const T* input2, T* output) {
+    return wrapper::binary<dimensions>(input1, input2, output,
+        [=](const sycl::float4& px1, const sycl::float4& px2) {
+            return sycl::float4{
+                sycl::max(0.0f, px1.x() - px2.x()),
+                sycl::max(0.0f, px1.y() - px2.y()),
+                sycl::max(0.0f, px1.z() - px2.z()),
+                1.0f
+            };
+        }
+    );
+}
+
+template<int dimensions = 1, typename T>
+inline auto mul(const T* input1, const T* input2, T* output) {
+    return wrapper::binary<dimensions>(input1, input2, output,
+        [=](const sycl::float4& px1, const sycl::float4& px2) {
+            return sycl::float4{
+                sycl::min(1.0f, px1.x() * px2.x()),
+                sycl::min(1.0f, px1.y() * px2.y()),
+                sycl::min(1.0f, px1.z() * px2.z()),
+                1.0f
+            };
+        }
+    );
+}
+
+template<int dimensions, typename T>
+inline auto gaussian(const T* input, T* output, double sigma) {
+    auto radius = static_cast<size_t>(2 * detail::s_pi * sigma + 1);
+    auto extent = detail::repeat<dimensions>(radius);
+    auto halo = extent / 2;
+
+    auto coeff = -.5 / sigma / sigma;
+    auto normal = 1.0;
+    for (auto i = 0; i < dimensions; i++)
+        normal *= sycl::sqrt(2 * detail::s_pi * sigma * sigma);
+
+    return wrapper::map(input, output, extent,
+        [=](sycl::float4& acc, const sycl::float4& px, const sycl::id<dimensions>& id) {
+            auto pixel_dist = detail::sum_sqr(id, halo);
+            auto weight = sycl::exp(pixel_dist * coeff) / normal;
+
+            acc += px * weight;
+        }
+    );
+}
+
+template<int dimensions, typename T>
+inline auto bilateral(const T* input, T* output, double sigma_space, double sigma_color) {
+    auto radius = static_cast<size_t>(2 * detail::s_pi * sigma_space + 1);
+    auto extent = detail::repeat<dimensions>(radius);
+    auto halo = extent / 2;
+
+    auto space_coeff = -.5 / sigma_space / sigma_space;
+    auto color_coeff = -.5 / sigma_color / sigma_color;
+
+    return [=](sycl::item<dimensions> item) {
+        auto acc = sycl::float4{};
+        auto wacc = sycl::float4{};
+        auto cpx = detail::read(input, item);
+
+        detail::map(extent, [&](sycl::id<dimensions> id) {
+            auto px = detail::read(input, detail::get_linear_id(item, id, halo));
+            auto px_diff = detail::sqr_abs_diff(cpx, px);
+            auto px_dist = detail::sum_sqr(id, halo);
+
+            auto weight = sycl::exp(px_dist * space_coeff + px_diff * color_coeff);
+            acc += px * weight;
+            wacc += weight;
         });
+
+        acc = acc / wacc;
+        detail::write(output, item, acc);
     };
 }
 
 template<int dimensions, typename T>
-inline auto bilateral(const sycl::range<dimensions>& io_extent, const T* input, T* output, double sigma_space, double sigma_color) {
-    return [=](sycl::handler& cgh) {
-        auto radius = static_cast<size_t>(2 * detail::s_pi * sigma_space + 1);
-        auto extent = detail::repeat<dimensions>(radius);
-        auto halo = extent / 2;
+inline auto mean(const T* input, T* output, size_t radius = 1) {
+    auto extent = detail::repeat<dimensions>(2 * radius + 1);
+    auto halo = extent / 2;
 
-        auto space_coeff = -.5 / sigma_space / sigma_space;
-        auto color_coeff = -.5 / sigma_color / sigma_color;
+    return [=](sycl::item<dimensions> item) {
+        auto acc = sycl::float4{};
 
-        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
-            auto result_sum = sycl::float4{};
-            auto weight_sum = sycl::float4{};
-            auto curr_pixel = detail::read(input, item);
-
-            detail::map(extent, [&](sycl::id<dimensions> id) {
-                auto rel_pixel = detail::read(input, detail::get_linear_id(item, id, halo));
-                auto pixel_diff = detail::sqr_abs_diff(curr_pixel, rel_pixel);
-                auto pixel_dist = detail::sum_sqr(id, halo);
-
-                auto weight = sycl::exp(pixel_dist * space_coeff + pixel_diff * color_coeff);
-                result_sum += rel_pixel * weight;
-                weight_sum += weight;
-            });
-
-            detail::write(output, item, result_sum / weight_sum);
+        detail::map(extent, [&](sycl::id<dimensions> id) {
+            auto px = detail::read(input, detail::get_linear_id(item, id, halo));
+            acc += px;
         });
+
+        acc /= extent.size();
+        detail::write(output, item, acc);
     };
 }
 
-template<int dimensions, typename T>
-inline auto average(const sycl::range<dimensions>& io_extent, const T* input, T* output, size_t radius) {
-    return [=](sycl::handler& cgh) {
-        auto extent = detail::repeat<dimensions>(2 * radius + 1);
-        auto halo = extent / 2;
+// TODO: make a median filter based on a quantile estimator to handle get median without the need to set comptime radius
+template<int dimensions, size_t radius = 1, typename T>
+inline auto median(const T* input, T* output) {
+    constexpr auto size = detail::pow_v<2 * radius + 1, dimensions>();
+    auto extent = detail::repeat<dimensions>(2 * radius + 1);
+    auto halo = extent / 2;
 
-        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
-            auto result = sycl::float4(0);
+    return [=](sycl::item<dimensions> item) {
+        auto buf = sycl::marray<sycl::float4, size>{};
+        auto c = 0;
 
-            detail::map(extent, [&](sycl::id<dimensions> id) {
-                auto px = detail::read(input, detail::get_linear_id(item, id, halo));
-                result += px;
-            });
-
-            result /= extent.size();
-            detail::write(output, item, result);
+        detail::map(extent, [&](sycl::id<dimensions> id) {
+            auto px = detail::read(input, detail::get_linear_id(item, id, halo));
+            buf[c++] = px;
         });
-    };
-}
 
-template<size_t radius = 1, int dimensions, typename T>
-inline auto median(const sycl::range<dimensions>& io_extent, const T* input, T* output) {
-    return [=](sycl::handler& cgh) {
-        constexpr auto buffer_size = detail::meta::pow_v<2 * radius + 1, dimensions>();
-        auto extent = detail::repeat<dimensions>(2 * radius + 1);
-        auto halo = extent / 2;
+        for (size_t i = 0; i < size - 1; i++) {
+            auto swapped = false;
+            for (size_t j = 0; j < size - i - 1; j++) {
+                if (buf[j].x() + buf[j].y() + buf[j].z() <= buf[j + 1].x() + buf[j + 1].y() + buf[j + 1].z())
+                    continue;
 
-        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
-            auto count = 0;
-            auto buffer = sycl::marray<sycl::float4, buffer_size>{};
-
-            detail::map(extent, [&](sycl::id<dimensions> id) {
-                auto px = detail::read(input, detail::get_linear_id(item, id, halo));
-                buffer[count++] = px;
-            });
-
-            // It's fine if the radius is sufficiently small
-            for (auto i = 0; i < count - 1; i++) {
-                auto swapped = false;
-                for (auto j = 0; j < count - i - 1; j++) {
-                    if (buffer[j].x() + buffer[j].y() + buffer[j].z() <= buffer[j + 1].x() + buffer[j + 1].y() + buffer[j + 1].z())
-                        continue;
-
-                    swapped = true;
-                    auto tmp = buffer[j];
-                    buffer[j] = buffer[j + 1];
-                    buffer[j + 1] = tmp;
-                }
-
-                if (!swapped) break;
+                swapped = true;
+                auto tmp = buf[j];
+                buf[j] = buf[j + 1];
+                buf[j + 1] = tmp;
             }
 
-            detail::write(output, item, buffer[(count - 1) / 2]);
-        });
+            if (!swapped) break;
+        }
+
+        detail::write(output, item, buf[(c - 1) / 2]);
     };
 }
 
 template<int dimensions, typename T>
-inline auto convolve(const sycl::range<dimensions>& io_extent, const T* input, T* output, const sycl::range<dimensions>& window_extent, const float* window) {
-    return [=](sycl::handler& cgh) {
-        auto window_halo = window_extent / 2;
-
-        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
-            auto result = sycl::float4{};
-
-            detail::map(window_extent, [&](sycl::id<dimensions> id) {
-                auto px = detail::read(input, detail::get_linear_id(item, id, window_halo));
-                auto weight = window[detail::get_linear_id(window_extent, id)];
-                result += px * weight;
-            });
-
-            detail::write(output, item, result);
-        });
-    };
+inline auto convolve(const T* input, T* output, const sycl::range<dimensions>& filter_extent, const float* filter) {
+    return wrapper::map(input, output, filter_extent,
+        [=](sycl::float4& acc, const sycl::float4& px, const sycl::id<dimensions>& id) {
+            auto weight = filter[detail::get_linear_id(filter_extent, id)];
+            acc += px * weight;
+        }
+    );
 }
 
 template<int dimensions, typename T>
-inline auto erode(const sycl::range<dimensions>& io_extent, const T* input, T* output, const sycl::range<dimensions>& strel_extent, const bool* strel) {
-    return [=](sycl::handler& cgh) {
-        auto strel_halo = strel_extent;
+inline auto erode(const T* input, T* output, const sycl::range<dimensions>& strel_extent, const bool* strel) {
+    return wrapper::map(input, output, strel_extent,
+        [=](sycl::float4& acc, const sycl::float4& px, const sycl::id<dimensions>& id) {
+            auto enabled = strel[detail::get_linear_id(strel_extent, id)];
+            if (!enabled || (acc.x() + acc.y() + acc.z() >= px.x() + px.y() + px.z())) return;
 
-        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
-            auto result = sycl::float4{0.0f};
-            auto sum = 0.0f;
-
-            detail::map(strel_extent, [&](sycl::id<dimensions> id) {
-                auto px = detail::read(input, detail::get_linear_id(item, id, strel_halo));
-                auto enabled = strel[detail::get_linear_id(strel_extent, id)];
-                if (!enabled) return;
-
-                auto new_sum = px.x() + px.y() + px.z();
-                if (sum > new_sum) {
-                    sum = new_sum;
-                    result = px;
-                }
-            });
-
-            detail::write(output, item, result);
-        });
-    };
+            acc = px;
+        }
+    );
 }
 
 template<int dimensions, typename T>
-inline auto dilate(const sycl::range<dimensions>& io_extent, const T* input, T* output, const sycl::range<dimensions>& strel_extent, const bool* strel) {
-    return [=](sycl::handler& cgh) {
-        auto strel_halo = strel_extent;
+inline auto dilate(const T* input, T* output, const sycl::range<dimensions>& strel_extent, const bool* strel) {
+    return wrapper::map(input, output, strel_extent, sycl::float4{1.0f},
+        [=](sycl::float4& acc, const sycl::float4& px, const sycl::id<dimensions>& id) {
+            auto enabled = strel[detail::get_linear_id(strel_extent, id)];
+            if (!enabled || (acc.x() + acc.y() + acc.z() <= px.x() + px.y() + px.z())) return;
 
-        cgh.parallel_for(io_extent, [=](sycl::item<dimensions> item) {
-            auto result = sycl::float4{1.0f};
-            auto sum = 3.0f;
-
-            detail::map(strel_extent, [&](sycl::id<dimensions> id) {
-                auto px = detail::read(input, detail::get_linear_id(item, id, strel_halo));
-                auto enabled = strel[detail::get_linear_id(strel_extent, id)];
-                if (!enabled) return;
-
-                auto new_sum = px.x() + px.y() + px.z();
-                if (sum < new_sum) {
-                    sum = new_sum;
-                    result = px;
-                }
-            });
-
-            detail::write(output, item, result);
-        });
-    };
+            acc = px;
+        }
+    );
 }
 
 template<int dimensions, typename T>
-inline auto geodesic_erode(const sycl::range<dimensions>& io_extent, const T* marker, const T* mark, T* output, const sycl::range<dimensions>& strel_extent, const bool* strel) {
-    return [=](sycl::handler& cgh) {
-        cgh.parallel_for(io_extent, erode<dimensions>(marker, output, strel_extent, strel));
-        cgh.parallel_for(io_extent, max(output, mark, output));
-    };
+inline auto open(const T* input, T* output, T* buffer, const sycl::range<dimensions>& strel_extent, const bool* strel) {
+    return std::make_tuple(
+        erode<dimensions>(input, buffer, strel_extent, strel),
+        dilate<dimensions>(buffer, output, strel_extent, strel)
+    );
 }
 
 template<int dimensions, typename T>
-inline auto geodesic_dilate(const sycl::range<dimensions>& io_extent, const T* marker, const T* mark, T* output, const sycl::range<dimensions>& strel_extent, const bool* strel) {
-    return [=](sycl::handler& cgh) {
-        cgh.parallel_for(io_extent, dilate<dimensions>(marker, output, strel_extent, strel));
-        cgh.parallel_for(io_extent, min(output, mark, output));
-    };
+inline auto close(const T* input, T* output, T* buffer, const sycl::range<dimensions>& strel_extent, const bool* strel) {
+    return std::make_tuple(
+        dilate<dimensions>(input, buffer, strel_extent, strel),
+        erode<dimensions>(buffer, output, strel_extent, strel)
+    );
 }
 
 template<int dimensions, typename T>
-inline auto open(const sycl::range<dimensions>& io_extent, const T* input, T* output, T* buffer, const sycl::range<dimensions>& strel_extent, const bool* strel) {
-    return [=](sycl::handler& cgh) {
-        erode(io_extent, input, buffer, strel_extent, strel)(cgh);
-        dilate(io_extent, buffer, output, strel_extent, strel)(cgh);
-    };
+inline auto white_tophat(const T* input, T* output, T* buffer, const sycl::range<dimensions>& strel_extent, const bool* strel) {
+    return std::tuple_cat(
+        open<dimensions>(input, buffer, output, strel_extent, strel),
+        std::make_tuple(sub<dimensions>(input, buffer, output))
+    );
 }
 
 template<int dimensions, typename T>
-inline auto close(const sycl::range<dimensions>& io_extent, const T* input, T* output, T* buffer, const sycl::range<dimensions>& strel_extent, const bool* strel) {
-    return [=](sycl::handler& cgh) {
-        dilate(io_extent, input, buffer, strel_extent, strel)(cgh);
-        erode(io_extent, buffer, output, strel_extent, strel)(cgh);
-    };
-}
-
-template<int dimensions, typename T>
-inline auto white_tophat(const sycl::range<dimensions>& io_extent, const T* input, T* output, T* buffer, const sycl::range<dimensions>& strel_extent, const bool* strel) {
-    return [=](sycl::handler& cgh) {
-        open(io_extent, input, buffer, output, strel_extent, strel)(cgh);
-        sub(io_extent, input, buffer, output)(cgh);
-    };
-}
-
-template<int dimensions, typename T>
-inline auto black_tophat(const sycl::range<dimensions>& io_extent, const T* input, T* output, T* buffer, const sycl::range<dimensions>& strel_extent, const bool* strel) {
-    return [=](sycl::handler& cgh) {
-        open(io_extent, input, buffer, output, strel_extent, strel)(cgh);
-        sub(io_extent, buffer, input, output)(cgh);
-    };
+inline auto black_tophat(const T* input, T* output, T* buffer, const sycl::range<dimensions>& strel_extent, const bool* strel) {
+    return std::tuple_cat(
+        close<dimensions>(input, buffer, output, strel_extent, strel),
+        std::make_tuple(sub<dimensions>(buffer, input, output))
+    );
 }
 
 }  // namespace hok
