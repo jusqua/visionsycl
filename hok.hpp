@@ -226,8 +226,8 @@ enum class gray {
 };
 
 enum class thresh {
-    normal,
-    invert,
+    positive,
+    negative,
 };
 
 } // namespace strategy
@@ -306,18 +306,18 @@ inline auto gray(const T* input, T* output) {
     );
 }
 
-template<int dimensions = 1, strategy::thresh strategy = strategy::thresh::normal, typename T>
+template<int dimensions = 1, strategy::thresh strategy = strategy::thresh::positive, typename T>
 inline auto thresh(const T* input, T* output, float threshold = 0.5f) {
     return wrapper::unary<dimensions>(input, output,
         [=](const sycl::float4& px) {
-            if constexpr (strategy == strategy::thresh::normal) {
+            if constexpr (strategy == strategy::thresh::positive) {
                 return sycl::float4{
                     px.x() > threshold ? 1.0f : 0.0f,
                     px.y() > threshold ? 1.0f : 0.0f,
                     px.z() > threshold ? 1.0f : 0.0f,
                     px.w()
                 };
-            } else if constexpr (strategy == strategy::thresh::invert) {
+            } else if constexpr (strategy == strategy::thresh::negative) {
                 return sycl::float4{
                     px.x() < threshold ? 1.0f : 0.0f,
                     px.y() < threshold ? 1.0f : 0.0f,
@@ -330,14 +330,17 @@ inline auto thresh(const T* input, T* output, float threshold = 0.5f) {
 }
 
 template<int dimensions = 1,
-        strategy::thresh thresh_strategy = strategy::thresh::normal,
+        strategy::thresh thresh_strategy = strategy::thresh::positive,
         strategy::gray gray_strategy = strategy::gray::luminance_bt601,
         typename T>
 inline constexpr auto binary(const T* input, T* output, float threshold = 0.5f) {
-    return std::make_tuple(
-        gray<dimensions, gray_strategy>(input, output),
-        thresh<dimensions, thresh_strategy>(output, output, threshold)
-    );
+    auto m_gray = gray<dimensions, gray_strategy>(input, output);
+    auto m_thresh = thresh<dimensions, thresh_strategy>(output, output, threshold);
+
+    return [=](sycl::item<dimensions> item) {
+        m_gray(item);
+        m_thresh(item);
+    };
 }
 
 template<int dimensions = 1, typename T>
@@ -413,8 +416,8 @@ inline auto gaussian(const T* input, T* output, double sigma) {
 
     return wrapper::map(input, output, extent,
         [=](sycl::float4& acc, const sycl::float4& px, const sycl::id<dimensions>& id) {
-            auto pixel_dist = detail::sum_sqr(id, halo);
-            auto weight = sycl::exp(pixel_dist * coeff) / normal;
+            auto px_dist = detail::sum_sqr(id, halo);
+            auto weight = sycl::exp(px_dist * coeff) / normal;
 
             acc += px * weight;
         }
