@@ -274,6 +274,15 @@ inline auto invert(const T* input, T* output) {
     );
 }
 
+template<int dimensions = 1, typename T>
+inline auto adjust(const T* input, T* output, const sycl::float4& level) {
+    return wrapper::unary<dimensions>(input, output,
+        [=](const sycl::float4& px) {
+            return px * level;
+        }
+    );
+}
+
 template<int dimensions = 1, strategy::gray strategy = strategy::gray::luminance_bt601, typename T>
 inline auto gray(const T* input, T* output) {
     return wrapper::unary<dimensions>(input, output,
