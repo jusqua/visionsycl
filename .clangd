@@ -1,2 +1,0 @@
-CompileFlags:
-  Add: [-std=c++17, -Wall, -Wextra, -D_CRT_SECURE_NO_WARNINGS]

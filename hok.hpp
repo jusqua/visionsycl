@@ -5,6 +5,8 @@
 #include <sycl/sycl.hpp>
 
 // TODO: Document
+// TODO: Add noise operator with deterministic rand number generator
+// TODO: Add flip operator for any axis
 namespace hok {
 
 namespace detail {
